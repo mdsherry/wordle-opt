@@ -1,12 +1,13 @@
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 
 use atomic_float::AtomicF64;
+use fast_math::log2_raw;
 use ordered_float::OrderedFloat;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 
 const BUCKETS_SIZE: usize = 3 * 81;
 type Buckets = [u16; BUCKETS_SIZE];
+const MAX_FAST_LOG_ABSOLUTE_ERROR: f64 = 0.009;
 
 fn info<'a>(buckets: impl IntoIterator<Item=&'a u16>) -> f64 {
     let mut total = 0.;
@@ -23,21 +24,39 @@ fn info<'a>(buckets: impl IntoIterator<Item=&'a u16>) -> f64 {
     -h
 }
 
-fn info_two(outcomes1: &Outcomes, outcomes2: &Outcomes, buckets: &mut FxHashMap<usize, u16>, idxs: &mut Vec<usize>) -> f64 {
-    // let mut buckets2 = [0; BUCKETS_SIZE * BUCKETS_SIZE];
-    // let mut buckets2 = vec![0; BUCKETS_SIZE * BUCKETS_SIZE];
-    buckets.clear();
-    // idxs.clear();
-    let mut idxs = vec![];
-    idxs.extend(outcomes1.outcomes.iter().zip(&outcomes2.outcomes).map(|(&a, &b)| a as usize * BUCKETS_SIZE + b as usize));
-    // for (outcome1, outcome2) in outcomes1.outcomes.iter().zip(&outcomes2.outcomes) {
-    for idx in idxs.iter().copied() {
-        // let idx = *outcome1 as usize * BUCKETS_SIZE + *outcome2 as usize;
-        // buckets2[idx] += 1;
-        *buckets.entry(idx).or_default() += 1;
+fn fast_info<'a>(buckets: impl IntoIterator<Item=&'a u16>) -> f64 {
+    let mut total = 0.;
+    let mut h = 0.;
+    for &bucket in buckets {
+        if bucket > 0 {
+            // let p = (bucket as f64) / total;
+            let p = bucket as f64;
+            total += p;
+            h += p * log2_raw(p as f32) as f64;
+        }
     }
-    info(buckets.values())
+    h = h / total - total.log2();
+    -h
+}
+type BucketType = Vec<u16>;
+fn bucket_two(outcomes1: &Outcomes, outcomes2: &Outcomes, buckets: &mut BucketType) {
+    buckets.clear();
+    buckets.resize(outcomes1.max as usize * outcomes2.max as usize, 0);
+    let mut idxs = vec![];
+    idxs.extend(outcomes1.outcomes.iter().zip(&outcomes2.outcomes).map(|(&a, &b)| a as usize * outcomes2.max as usize + b as usize));
+    for idx in idxs.iter().copied() {
+        buckets[idx] += 1;
+    }
+}
 
+fn bucket_three(outcomes1_2: &Outcomes2, outcomes3: &Outcomes, buckets: &mut BucketType) {
+    buckets.clear();
+    buckets.resize(outcomes1_2.max as usize * outcomes3.max as usize, 0);
+    let mut idxs = vec![];
+    idxs.extend(outcomes1_2.outcomes.iter().zip(&outcomes3.outcomes).map(|(&a, &b)| a as usize * outcomes3.max as usize + b as usize));
+    for idx in idxs.iter().copied() {
+        buckets[idx] += 1;
+    }
 }
 
 #[derive(Debug)]
@@ -64,10 +83,48 @@ impl<'a> AugmentedAnswer<'a> {
 
 #[derive(Clone)]
 struct Outcomes {
-    outcomes: Vec<u8>
+    outcomes: Vec<u8>,
+    max: u8
+}
+
+struct Outcomes2 {
+    outcomes: Vec<u16>,
+    max: u16
+}
+impl Outcomes2 {
+    pub fn new(outcomes1: &Outcomes, outcomes2: &Outcomes) -> Self {
+        let mut xlate = [243 * 243; 243 * 243];
+        let mut max = 0;
+        let mut outcomes = vec![];
+        for (&o1, &o2) in outcomes1.outcomes.iter().zip(&outcomes2.outcomes) {
+            let idx = o1 as usize * outcomes1.max as usize + o2 as usize;
+            if xlate[idx] == 243 * 243 {
+                xlate[idx] = max;
+                outcomes.push(max);
+                max += 1;
+            } else {
+                outcomes.push(xlate[idx]);
+            }
+        }
+        Outcomes2 { outcomes, max }
+    }
 }
 
 impl Outcomes {
+    pub fn new(mut outcomes: Vec<u8>) -> Self {
+        let mut xlate = [243; 243];
+        let mut max = 0;
+        for outcome in &mut outcomes {
+            if xlate[*outcome as usize] == 243 {
+                xlate[*outcome as usize] = max;
+                *outcome = max;
+                max += 1;
+            } else {
+                *outcome = xlate[*outcome as usize];
+            }
+        }
+        Outcomes { outcomes, max }
+    }
     pub fn from_answers_table(guess: &str, answers_table: &AnswersTable) -> Self {
         let bytes = guess.as_bytes();
         let outcomes = answers_table[0][(bytes[0] - b'a') as usize].iter()
@@ -79,7 +136,7 @@ impl Outcomes {
                 a * 81 + b * 27 + c * 9 + d * 3 + e
             })
             .collect();
-        Outcomes { outcomes }
+        Self::new(outcomes)
     }
     pub fn bucket(&self) -> Buckets {
         let mut buckets = [0; BUCKETS_SIZE];
@@ -98,9 +155,8 @@ type AnswersTable = [[Vec<u8>; 26]; 5];
 
 fn build_answers_table(answers: &[AugmentedAnswer<'_>]) -> AnswersTable {
     let mut rv = [(); 5].map(|_| [(); 26].map(|_| Vec::with_capacity(answers.len())));
-    for pos in 0..5 {
-        for letter in 0..26 {
-            let column = &mut rv[pos][letter];
+    for (pos, word_pos) in rv.iter_mut().enumerate() {
+        for (letter, column) in word_pos.iter_mut().enumerate().take(26) {
             let ch = letter as u8 + b'a';
             let bitmask = 1 << letter;
             for answer in answers {
@@ -121,33 +177,19 @@ fn build_answers_table(answers: &[AugmentedAnswer<'_>]) -> AnswersTable {
 
 impl<'a> WordleOpt<'a> {
     pub fn new(words: &[&'a str], answers: &'a [&'a str]) -> Self {
-        let ts = std::time::Instant::now();
-        
         let aug_answers: Vec<_> = answers.iter().copied().map(AugmentedAnswer::new).collect();
         let answers_table = build_answers_table(&aug_answers);
-        println!("{}", ts.elapsed().as_millis());
-        let semi_answers: Vec<_> = words
-        .iter()
-        .chain(answers.iter())
-        .copied()
-        .map(|word| {
-            (word, Outcomes::from_answers_table(word, &answers_table))
-        }).collect();
-        println!("{}", ts.elapsed().as_millis());
-        let mut all_words: Vec<_> = semi_answers.into_iter().map(|(word, outcomes)| {
+        let semi_answers= words
+            .iter()
+            .chain(answers.iter())
+            .copied()
+            .map(|word| {
+                (word, Outcomes::from_answers_table(word, &answers_table))
+            });
+        let mut all_words: Vec<_> = semi_answers.map(|(word, outcomes)| {
             (AugmentedWord { word, info: info(&outcomes.bucket()) }, outcomes)
         }).collect();
-        // let mut all_words: Vec<_> = words
-        //     .iter()
-        //     .chain(answers.iter())
-        //     .copied()
-        //     .map(|word| {
-        //         let outcomes = Outcomes::new(word, &aug_answers);
-        //         (AugmentedWord { word, info: info(&outcomes.bucket()) }, outcomes)
-        //     })
-        //     .collect();
         all_words.sort_unstable_by_key(|(w, _)| OrderedFloat(-w.info));
-        println!("{}", ts.elapsed().as_millis());
         WordleOpt { answers_table, all_words }
     }
 
@@ -160,64 +202,79 @@ impl<'a> WordleOpt<'a> {
         let first_word_outcome = Outcomes::from_answers_table(first_word, &self.answers_table);
         let first_word_info = info(&first_word_outcome.bucket());
         let mut rv = Vec::with_capacity(self.all_words.len());
-        let ts = std::time::Instant::now();
-        let mut buckets = FxHashMap::default();
-        let mut idxs = vec![];
+        let mut buckets = BucketType::default();
         for (aug_word, second_outcome) in &self.all_words {
             if aug_word.word == first_word {
                 continue;
             }
             
-            let joint_info = info_two(&first_word_outcome, second_outcome, &mut buckets, &mut idxs);
+            bucket_two(&first_word_outcome, second_outcome, &mut buckets);
+            let joint_info = info(&buckets);
             rv.push(AugmentedWord { word: aug_word.word, info: joint_info - first_word_info });
         }
-        println!("{}", ts.elapsed().as_millis());
         rv.sort_unstable_by_key(|w| -OrderedFloat(w.info));
         rv
     }
     
+    pub fn best_third_word(&self, first_word: &str, second_word: &str) -> Vec<AugmentedWord> {
+        let first_word_outcome = Outcomes::from_answers_table(first_word, &self.answers_table);
+        let second_word_outcome = Outcomes::from_answers_table(second_word, &self.answers_table);
+        let joint_outcomes = Outcomes2::new(&first_word_outcome, &second_word_outcome);
+        let mut rv = Vec::with_capacity(self.all_words.len());
+        let mut buckets = BucketType::default();
+        bucket_two(&first_word_outcome, &second_word_outcome, &mut buckets);
+        let joint_two_info = info(&buckets);
+        for (aug_word, third_outcome) in &self.all_words {
+            if aug_word.word == first_word {
+                continue;
+            }
+            
+            bucket_three(&joint_outcomes, third_outcome, &mut buckets);
+            let joint_info = info(&buckets);
+            rv.push(AugmentedWord { word: aug_word.word, info: joint_info - joint_two_info });
+        }
+        
+        rv.sort_unstable_by_key(|w| -OrderedFloat(w.info));
+        rv
+    }
+
     pub fn best_two(&self) -> Option<(&str, &str, f64)> {
         let best_info = AtomicF64::new(0.);
         let best_info_word = self.all_words.get(0).map(|w| w.0.info).unwrap_or_default();
-        let i = AtomicU32::new(0);
         self.all_words.par_iter().filter_map(|(aug_word, outcomes)| {
-            let cnt = i.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            let ts = std::time::Instant::now();
-            if cnt % 100 == 0 {
-                println!("{}, {}", cnt, aug_word.info);
-            }
-            let mut best_h = best_info.load(std::sync::atomic::Ordering::Acquire);
+             let mut best_h = best_info.load(Ordering::Acquire);
             let mut required_h = best_h - aug_word.info;
             if required_h > best_info_word {
                 return None;
             }
             let mut best_word = None;
             let it = self.all_words.iter().skip_while(|(w, _)| w.info > aug_word.info || w.word != aug_word.word).skip(1);
-            let mut buckets = FxHashMap::default();
-            let mut idxs = vec![];
+            let mut buckets = BucketType::default();
             for (other_word, other_outcome) in it {
                 if other_word.info < required_h {
                     break;
                 }
-                let h = info_two(outcomes, other_outcome, &mut buckets, &mut idxs);
-                if h > best_h {
-                    best_h = best_info.load(std::sync::atomic::Ordering::Acquire);
+                bucket_two(outcomes, other_outcome, &mut buckets);
+                let h = fast_info(&buckets);
+                if h + MAX_FAST_LOG_ABSOLUTE_ERROR > best_h {
+                    let h = info(&buckets);
                     if h > best_h {
                         best_h = h;
-                        best_info.store(best_h, std::sync::atomic::Ordering::Release);
                         best_word = Some(other_word.word);
                         required_h = best_h - aug_word.info;
                     }
                 }
             }
-            if cnt % 100 == 0 {
-                println!("{}", ts.elapsed().as_millis());
-            }
-            best_word.map(|best_word| {
-                best_info.store(best_h, std::sync::atomic::Ordering::Release);
-                (aug_word.word, best_word, best_h)
+            best_word.and_then(|best_word| {
+                let current_best = best_info.load(Ordering::Acquire);
+                if current_best < best_h {
+                    best_info.store(best_h, Ordering::Release);
+                    Some((aug_word.word, best_word, best_h))
+                } else {
+                    None
+                }
             })            
-        }).inspect(|w| println!("{:?}", w))
+        })
         .max_by_key(|(_, _, h)| OrderedFloat(*h))
     }
 }
