@@ -1,4 +1,4 @@
-pub mod approx;
+// pub mod approx;
 
 use std::sync::atomic::Ordering;
 
@@ -82,20 +82,18 @@ pub struct AugmentedWord<'a> {
 #[derive(Debug, Clone)]
 pub struct AugmentedAnswer<'a> {
     pub word: &'a str,
-    // bitmask: u32,
-    counts: [u8; 26]
+    counts: [u8; 26],
 }
 
 impl<'a> AugmentedAnswer<'a> {
     fn new(word: &'a str) -> Self {
-        let mut bitmask = 0;
         let mut counts = [0; 26];
         for ch in word.chars() {
             assert!(ch.is_ascii_lowercase());
             let b = ch as u8 - b'a';
-            bitmask |= 1 << b;
             counts[b as usize] += 1;
         }
+
         Self { word, counts }
     }
 
@@ -150,7 +148,11 @@ impl<'a> AugmentedAnswer<'a> {
         rv
     }
     pub fn greens(&self, guess: &str) -> u8 {
-        guess.chars().zip(self.word.chars()).filter(|(a, b)| a == b).count() as u8
+        guess
+            .chars()
+            .zip(self.word.chars())
+            .filter(|(a, b)| a == b)
+            .count() as u8
     }
 }
 
@@ -212,19 +214,22 @@ trait LetterIndex {
 }
 impl LetterIndex for char {
     fn idx(self) -> usize {
-    ((self as u8) - b'a') as usize
-}
+        ((self as u8) - b'a') as usize
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{AugmentedAnswer, build_answers_table, Outcomes, LetterIndex, bucket_label};
+    use crate::{bucket_label, build_answers_table, AugmentedAnswer, LetterIndex, Outcomes};
 
     #[test]
     fn test_augmented_answers() {
         let aug = AugmentedAnswer::new("brass");
         assert_eq!(aug.word, "brass");
-        assert_eq!(aug.counts, [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            aug.counts,
+            [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0]
+        );
     }
 
     #[test]
@@ -248,8 +253,8 @@ mod test {
         let aug2 = AugmentedAnswer::new("arose");
         let aug3 = AugmentedAnswer::new("allay");
         let aug4 = AugmentedAnswer::new("admit");
-        let table = build_answers_table(&[aug3, aug4]);
-        let raw_outcomes = Outcomes::uncompressed_outcomes("soare", &table);
+        let answers_table = build_answers_table(&[aug1, aug2, aug3, aug4]);
+        let raw_outcomes = Outcomes::uncompressed_outcomes("soare", &answers_table);
         dbg!(&raw_outcomes);
         eprintln!("{}", bucket_label(raw_outcomes[0] as usize));
         eprintln!("{}", bucket_label(raw_outcomes[1] as usize));
@@ -264,7 +269,6 @@ impl Outcomes {
         let mut xlate = [243; 243];
         let mut max = 0;
         for outcome in &mut outcomes {
-            
             if xlate[*outcome as usize] == 243 {
                 xlate[*outcome as usize] = max;
                 *outcome = max;
@@ -277,36 +281,35 @@ impl Outcomes {
         Outcomes { outcomes, max }
     }
     pub fn new_uncompressed(guess: &str, answers_table: &AnswersTable) -> Self {
-        Outcomes { outcomes: Self::uncompressed_outcomes(guess, answers_table), max: 243 }
+        Outcomes {
+            outcomes: Self::uncompressed_outcomes(guess, answers_table),
+            max: 243,
+        }
     }
+
+    pub fn from_answers_table(guess: &str, answers_table: &AnswersTable) -> Self {
+        Self::new(Self::uncompressed_outcomes(guess, answers_table))
+    }
+
     fn uncompressed_outcomes(guess: &str, answers_table: &AnswersTable) -> Vec<u8> {
         let mut counts = [0; 26];
         let mut outcomes = vec![0; answers_table[0][0].len()];
         for (b, answers_table) in guess.chars().zip(answers_table) {
             outcomes.iter_mut().for_each(|o| *o *= 3);
-            
+
             counts[b.idx()] += 1;
-            for (outcome, blah) in outcomes.iter_mut().zip(&answers_table[b.idx()]) {
-                if *blah == -1 {
+            for (outcome, answer_count) in outcomes.iter_mut().zip(&answers_table[b.idx()]) {
+                if *answer_count == -1 {
                     *outcome += 2;
-                } else if *blah >= counts[b.idx()] {
+                } else if *answer_count >= counts[b.idx()] {
                     *outcome += 1;
                 }
             }
         }
-        // let outcomes = answers_table[0][(bytes[0] - b'a') as usize]
-        //     .iter()
-        //     .zip(answers_table[1][(bytes[1] - b'a') as usize].iter())
-        //     .zip(answers_table[2][(bytes[2] - b'a') as usize].iter())
-        //     .zip(answers_table[3][(bytes[3] - b'a') as usize].iter())
-        //     .zip(answers_table[4][(bytes[4] - b'a') as usize].iter())
-        //     .map(|((((a, b), c), d), e)| a * 81 + b * 27 + c * 9 + d * 3 + e)
-        //     .collect();
+
         outcomes
     }
-    pub fn from_answers_table(guess: &str, answers_table: &AnswersTable) -> Self {
-        Self::new(Self::uncompressed_outcomes(guess, answers_table))
-    }
+
     pub fn bucket(&self) -> Buckets {
         let mut buckets = [0; BUCKETS_SIZE];
         for outcome in &self.outcomes {
@@ -329,12 +332,13 @@ fn build_answers_table(answers: &[AugmentedAnswer<'_>]) -> AnswersTable {
     for (pos, word_pos) in rv.iter_mut().enumerate() {
         for (letter, column) in word_pos.iter_mut().enumerate().take(26) {
             let ch = letter as u8 + b'a';
-            let bitmask = 1 << letter;
             for answer in answers {
                 let answer_ch = answer.word.as_bytes()[pos];
                 let result = if answer_ch == ch {
                     -1
-                } else { answer.counts[letter] as i8 };
+                } else {
+                    answer.counts[letter] as i8
+                };
                 column.push(result);
             }
         }
@@ -373,14 +377,20 @@ impl<'a> WordleOpt<'a> {
         &self.aug_answers
     }
 
-    fn pruned_generic(&self, guess: &str, answer_filter: impl Fn(&AugmentedAnswer) -> bool) -> Self {
+    fn pruned_generic(
+        &self,
+        guess: &str,
+        answer_filter: impl Fn(&AugmentedAnswer) -> bool,
+    ) -> Self {
         let aug_answers: Vec<_> = self
             .aug_answers
             .iter()
             .filter(|a| answer_filter(*a))
             .cloned()
             .collect();
+        
         let answers_table = build_answers_table(&aug_answers);
+
         let semi_answers = self
             .all_words()
             .map(|aug| aug.word)
@@ -413,7 +423,9 @@ impl<'a> WordleOpt<'a> {
     }
 
     pub fn pruned_2(&self, guess: &str, yellow: u8, green: u8) -> Self {
-        self.pruned_generic(guess, |a| a.word != guess && a.greens(guess) == green && a.yellows(guess) == yellow)
+        self.pruned_generic(guess, |a| {
+            a.word != guess && a.greens(guess) == green && a.yellows(guess) == yellow
+        })
     }
 
     pub fn answers_table(&self) -> &AnswersTable {
@@ -426,7 +438,7 @@ impl<'a> WordleOpt<'a> {
     }
 
     pub fn best_second_words(&self, first_word: &str) -> Vec<AugmentedWord> {
-        let first_word_outcome = Outcomes::from_answers_table(first_word, &self.answers_table);
+        let first_word_outcome = Outcomes::from_answers_table(first_word, &self.answers_table());
         let first_word_info = info(&first_word_outcome.bucket());
         let mut rv = Vec::with_capacity(self.all_words.len());
         let mut buckets = BucketType::default();
@@ -447,8 +459,8 @@ impl<'a> WordleOpt<'a> {
     }
 
     pub fn best_third_word(&self, first_word: &str, second_word: &str) -> Vec<AugmentedWord> {
-        let first_word_outcome = Outcomes::from_answers_table(first_word, &self.answers_table);
-        let second_word_outcome = Outcomes::from_answers_table(second_word, &self.answers_table);
+        let first_word_outcome = Outcomes::from_answers_table(first_word, &self.answers_table());
+        let second_word_outcome = Outcomes::from_answers_table(second_word, &self.answers_table());
         let joint_outcomes = Outcomes2::new(&first_word_outcome, &second_word_outcome);
         let mut rv = Vec::with_capacity(self.all_words.len());
         let mut buckets = BucketType::default();
@@ -542,81 +554,6 @@ impl<'a> WordleOpt<'a> {
             .flatten()
             .collect();
         rv.sort_by_key(|(_, _, h)| OrderedFloat(*h));
-        rv
-    }
-
-    pub fn best_conditional_second(
-        &self,
-        first_word: &str,
-    ) -> [Option<(AugmentedWord<'a>, usize)>; 6] {
-        let mut rv = [None, None, None, None, None, None];
-        let mut outcome_answers: [Vec<AugmentedAnswer>; 6] = [
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ];
-        
-        for answer in &self.aug_answers {
-            if answer.word == first_word {
-                continue;
-            }
-            let hits = answer.hits(first_word);
-            outcome_answers[hits].push(answer.clone());
-        }
-
-        let answers_tables: [_; 6] = [
-            build_answers_table(&outcome_answers[0]),
-            build_answers_table(&outcome_answers[1]),
-            build_answers_table(&outcome_answers[2]),
-            build_answers_table(&outcome_answers[3]),
-            build_answers_table(&outcome_answers[4]),
-            build_answers_table(&outcome_answers[5]),
-        ];
-        for i in 0..6 {
-            if outcome_answers[i].len() == 0 {
-                rv[i] = None;
-            } else if outcome_answers[i].len() == 1 {
-                rv[i] = Some((
-                    AugmentedWord {
-                        word: outcome_answers[i][0].word,
-                        info: 0.,
-                    },
-                    1,
-                ));
-            } else {
-                let base_outcome = Outcomes::from_answers_table(first_word, &answers_tables[i]);
-                let semi_answers =
-                    self.all_words()
-                        .filter(|word| word.word != first_word)
-                        .map(|word| {
-                            (
-                                word.word,
-                                Outcomes::from_answers_table(word.word, &answers_tables[i]),
-                            )
-                        });
-                let mut buckets = vec![];
-                let all_words: Vec<_> = semi_answers
-                    .map(|(word, outcomes)| {
-                        buckets.clear();
-                        bucket_two(&base_outcome, &outcomes, &mut buckets);
-                        AugmentedWord {
-                            word,
-                            info: info(&buckets),
-                        }
-                    })
-                    .collect();
-                let word_count = outcome_answers[i].len();
-
-                rv[i] = all_words
-                    .into_iter()
-                    .max_by_key(|w| OrderedFloat(w.info))
-                    .map(|w| (w, word_count));
-            }
-        }
-
         rv
     }
 
