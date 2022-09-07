@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, io::Write};
 
 use wordle_opt::{WordleOpt, Outcomes, bucket_label, info};
 use clap::Parser;
@@ -185,14 +185,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Mode::Solver => {
             let mut wordle_opt = wordle_opt.clone();
+            println!("Responses should be entered in the form returned by `buckets` or `best-second-precise`, e.g. __!?_ where _ indicates a miss, ! a green letter, and ? a yellow letter.");
             loop {
                 if wordle_opt.answers().len() == 1 {
                     println!("Solution: {}", wordle_opt.answers()[0].word);
                     break;
                 } else {
                     let guess = wordle_opt.all_words().next().unwrap();
-                    println!("{} ({})", guess.word, guess.info);
-                    println!("{} {}", wordle_opt.answers().len(), wordle_opt.answers().iter().any(|a| a.word == "brass"));
+                    println!("Guess: {} ({})", guess.word, guess.info);
+                    print!("Enter response: ");
+                    std::io::stdout().flush()?;
                     let mut buf = String::new();
                     std::io::stdin().read_line(&mut buf).unwrap();
                     let hits = string_to_outcome(buf.trim());
